@@ -7,7 +7,7 @@ def stk_to_xarray(path_to_stk_file: str):
     Converts an attitude (.a) or ephemeris (.e) file from STK into an xarray dataset.
     """
 
-    supported_attitude_formats = ['AttitudeTimeQuatAngVels']
+    supported_attitude_formats = ['AttitudeTimeQuatAngVels', 'AttitudeTimeQuaternions']
     supported_ephemeris_formats = ['EphemerisTimePosVel']
 
     supported_extra_data = ['SegmentBoundaryTimes']
@@ -85,23 +85,38 @@ def stk_to_xarray(path_to_stk_file: str):
 
         if attrs['format'] == 'AttitudeTimeQuatAngVels':
             data = np.loadtxt(file, dtype=float, ndmin=2, comments=['END'])
-
             coords = {'time': ('time', data[:, 0])}
             data_vars = {
-                'quaternion_angles': (['time', 'q'], data[:, 1:5]),
+                'quaternions': (['time', 'q'], data[:, 1:5]),
                 'angular_velocities': (['time', 'xyz'], data[:, 5:])
             }
             ds = xr.Dataset(data_vars=data_vars, coords=coords, attrs=attrs)
-        elif attrs['format'] == 'EphemerisTimePosVel':
+        elif attrs['format'] == 'AttitudeTimeQuaternions':
             data = np.loadtxt(file, dtype=float, ndmin=2, comments=['END'])
             coords = {'time': ('time', data[:, 0])}
-            data_vars = {
-                'positions': (['time', 'xyz'], data[:, 1:4]),
-                'velocities': (['time', 'xyz'], data[:, 4:])
-            }
-            for data in extra_data:
-                data_vars[data] = (data, extra_data[data])
+            data_vars = {'quaternions': (['time', 'q'], data[:, 1:])}
             ds = xr.Dataset(data_vars=data_vars, coords=coords, attrs=attrs)
+        elif attrs['format'] == 'EphemerisTimePosVel':
+            data = np.loadtxt(file, dtype=float, ndmin=2, comments=['END'])
+            ds = []
+            istart = 0
+            for i in range(len(extra_data['SegmentBoundaryTimes'])):
+                # find the ending index for the current segment
+                if i == len(extra_data['SegmentBoundaryTimes']) - 1:
+                    iend = data.shape[0]
+                else:
+                    iend = np.where(data[:, 0] == extra_data['SegmentBoundaryTimes'][i + 1])[0][0]
+                coords = {'time': ('time', data[istart:iend, 0])}
+                data_vars = {
+                    'positions': (['time', 'xyz'], data[istart:iend, 1:4]),
+                    'velocities': (['time', 'xyz'], data[istart:iend, 4:])
+                }
+                for extra in extra_data:
+                    data_vars[extra] = (extra, extra_data[extra])
+                ds.append(xr.Dataset(data_vars=data_vars, coords=coords))
+                istart = iend + 1
+            ds = xr.merge(ds)
+            ds.attrs = attrs
         else:
             raise ValueError(f'Unknown format {attrs["format"]}')
 
@@ -127,7 +142,24 @@ def xarray_to_stk(dataset: xr.Dataset, path_to_stk_file: str):
 
         header = ''.join(meta_lines)
         footer = '\nEND Attitude'
-        data = np.column_stack((dataset.time.values, dataset.quaternion_angles.values, dataset.angular_velocities.values))
+        data = np.column_stack((dataset.time.values, dataset.quaternions.values, dataset.angular_velocities.values))
+        np.savetxt(path_to_stk_file, data, fmt='%.16e', comments='', header=header, footer=footer)
+    elif dataset.attrs['format'] == 'AttitudeTimeQuaternions':
+        meta_lines = [
+            f'{dataset.attrs["version"]}\n',
+            f'BEGIN Attitude\n',
+            f'NumberOfAttitudePoints {dataset.attrs["NumberOfAttitudePoints"]}\n',
+            f'BlockingFactor {dataset.attrs["BlockingFactor"]}\n',
+            f'InterpolationOrder {dataset.attrs["InterpolationOrder"]}\n',
+            f'CentralBody {dataset.attrs["CentralBody"]}\n',
+            f'ScenarioEpoch {dataset.attrs["ScenarioEpoch"]}\n',
+            f'CoordinateAxes {dataset.attrs["CoordinateAxes"]}\n',
+            f'{dataset.attrs["format"]}\n',
+        ]
+
+        header = ''.join(meta_lines)
+        footer = '\nEND Attitude'
+        data = np.column_stack((dataset.time.values, dataset.quaternions.values))
         np.savetxt(path_to_stk_file, data, fmt='%.16e', comments='', header=header, footer=footer)
     elif dataset.attrs['format'] == 'EphemerisTimePosVel':
         meta_lines = [
@@ -172,3 +204,9 @@ def is_dataline(line):
     except ValueError:
         return False
 
+
+if __name__ == '__main__':
+    filename = 'CubeSatICRF.e'
+    ds = stk_to_xarray(f'data//{filename}')
+    print(ds)
+    ds.to_netcdf(f'data//{filename[:-1]}nc')
